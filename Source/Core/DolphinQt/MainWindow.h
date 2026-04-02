@@ -244,6 +244,7 @@ private:
   GameList* m_game_list;
   GameCount* m_game_count;
   RenderWidget* m_render_widget = nullptr;
+  QWidget* m_render_widget_container = nullptr;
   bool m_rendering_to_main;
   bool m_stop_confirm_showing = false;
   bool m_stop_requested = false;
@@ -292,5 +293,5 @@ private:
   ThreadWidget* m_thread_widget;
   WatchWidget* m_watch_widget;
   CheatsManager* m_cheats_manager{};
-  QByteArray m_render_widget_geometry;
+  QRect m_render_widget_geometry;
 };

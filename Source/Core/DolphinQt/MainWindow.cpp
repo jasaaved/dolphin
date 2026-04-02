@@ -299,7 +299,7 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
   m_state_slot =
       std::clamp(Settings::Instance().GetStateSlot(), 1, static_cast<int>(State::NUM_STATES));
 
-  m_render_widget_geometry = settings.value(QStringLiteral("renderwidget/geometry")).toByteArray();
+  m_render_widget_geometry = settings.value(QStringLiteral("renderwidget/geometry")).toRect();
 
   // Restoring of window states can sometimes go wrong, resulting in widgets being visible when they
   // shouldn't be so we have to reapply all our rules afterwards.
@@ -343,6 +343,14 @@ MainWindow::~MainWindow()
   AchievementManager::GetInstance().Shutdown();
 #endif  // USE_RETRO_ACHIEVEMENTS
 
+  // Detach the render window from its container before deleting it, so the container's
+  // destructor doesn't access the already-freed render window when Qt cleans up m_stack.
+  if (m_render_widget_container)
+  {
+    m_render_widget->setParent((QWindow*)nullptr);
+    delete m_render_widget_container;
+    m_render_widget_container = nullptr;
+  }
   delete m_render_widget;
   delete m_netplay_dialog;
 
@@ -370,7 +378,7 @@ MainWindow::~MainWindow()
 
 WindowSystemInfo MainWindow::GetWindowSystemInfo() const
 {
-  return ::GetWindowSystemInfo(m_render_widget->windowHandle());
+  return ::GetWindowSystemInfo(m_render_widget);
 }
 
 void MainWindow::InitControllers()
@@ -722,7 +730,7 @@ void MainWindow::ConnectRenderWidget()
   m_render_widget->hide();
   connect(m_render_widget, &RenderWidget::Closed, this, &MainWindow::ForceStop);
   connect(m_render_widget, &RenderWidget::FocusChanged, this, [this](bool focus) {
-    if (m_render_widget->isFullScreen())
+    if (m_render_widget->windowState() == Qt::WindowFullScreen)
       SetFullScreenResolution(focus);
   });
 }
@@ -960,14 +968,13 @@ bool MainWindow::RequestStop()
 
   const bool rendered_widget_was_active =
       Settings::Instance().IsKeepWindowOnTopEnabled() ||
-      (m_render_widget->isActiveWindow() && !m_render_widget->isFullScreen());
-  QWidget* confirm_parent = (!m_rendering_to_main && rendered_widget_was_active) ?
-                                m_render_widget :
-                                static_cast<QWidget*>(this);
+      (m_render_widget->isActive() &&
+       m_render_widget->windowState() != Qt::WindowFullScreen);
+  QWidget* confirm_parent = this;
   const bool was_cursor_locked = m_render_widget->IsCursorLocked();
 
-  if (!m_render_widget->isFullScreen())
-    m_render_widget_geometry = m_render_widget->saveGeometry();
+  if (m_render_widget->windowState() != Qt::WindowFullScreen)
+    m_render_widget_geometry = m_render_widget->geometry();
   else
     FullScreen();
 
@@ -1094,10 +1101,10 @@ void MainWindow::FullScreen()
   // If the render widget is fullscreen we want to reset it to whatever is in
   // settings. If it's set to be fullscreen then it just remakes the window,
   // which probably isn't ideal.
-  bool was_fullscreen = m_render_widget->isFullScreen();
+  bool was_fullscreen = m_render_widget->windowState() == Qt::WindowFullScreen;
 
   if (!was_fullscreen)
-    m_render_widget_geometry = m_render_widget->saveGeometry();
+    m_render_widget_geometry = m_render_widget->geometry();
 
   HideRenderWidget(false);
   SetFullScreenResolution(!was_fullscreen);
@@ -1114,7 +1121,7 @@ void MainWindow::FullScreen()
 
 void MainWindow::UnlockCursor()
 {
-  if (!m_render_widget->isFullScreen())
+  if (!m_render_widget->windowState() == Qt::WindowFullScreen)
     m_render_widget->SetCursorLocked(false);
 }
 
@@ -1218,7 +1225,7 @@ void MainWindow::StartGame(std::unique_ptr<BootParameters>&& parameters)
 
   // Boot up, show an error if it fails to load the game.
   if (!BootManager::BootCore(m_system, std::move(parameters),
-                             ::GetWindowSystemInfo(m_render_widget->windowHandle())))
+                             ::GetWindowSystemInfo(m_render_widget)))
   {
     ModalMessageBox::critical(this, tr("Error"), tr("Failed to init core"), QMessageBox::Ok);
     HideRenderWidget();
@@ -1272,7 +1279,8 @@ void MainWindow::ShowRenderWidget()
     // If we're rendering to main, add it to the stack and update our title when necessary.
     m_rendering_to_main = true;
 
-    m_stack->setCurrentIndex(m_stack->addWidget(m_render_widget));
+    m_render_widget_container = QWidget::createWindowContainer(m_render_widget, m_stack);
+    m_stack->setCurrentIndex(m_stack->addWidget(m_render_widget_container));
     connect(Host::GetInstance(), &Host::RequestTitle, this, &MainWindow::setWindowTitle);
     m_stack->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
     m_stack->repaint();
@@ -1285,7 +1293,11 @@ void MainWindow::ShowRenderWidget()
     m_rendering_to_main = false;
 
     m_render_widget->showNormal();
-    m_render_widget->restoreGeometry(m_render_widget_geometry);
+    if (m_render_widget_geometry.isValid())
+      m_render_widget->setGeometry(m_render_widget_geometry);
+    else
+      m_render_widget->resize(Config::Get(Config::MAIN_RENDER_WINDOW_WIDTH),
+                              Config::Get(Config::MAIN_RENDER_WINDOW_HEIGHT));
   }
 }
 
@@ -1293,10 +1305,19 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
 {
   if (m_rendering_to_main)
   {
-    // Remove the widget from the stack and reparent it to nullptr, so that it can draw
-    // itself in a new window if it wants. Disconnect the title updates.
-    m_stack->removeWidget(m_render_widget);
-    m_render_widget->setParent(nullptr);
+    // When stopping, hide the window before detaching so it doesn't flash as a
+    // full-size top-level window between the setParent call and the hide() below.
+    // When transitioning to fullscreen (reinit=false), skip this so the window
+    // stays visible for a smooth transition.
+    if (reinit)
+      m_render_widget->hide();
+    // Detach the QWindow from the container, then remove the container from the stack.
+    // setParent(nullptr) reparents the HWND to the desktop without destroying it,
+    // so the video backend's surface remains valid throughout the transition.
+    m_render_widget->setParent((QWindow*)nullptr);
+    m_stack->removeWidget(m_render_widget_container);
+    delete m_render_widget_container;
+    m_render_widget_container = nullptr;
     m_rendering_to_main = false;
     m_stack->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     disconnect(Host::GetInstance(), &Host::RequestTitle, this, &MainWindow::setWindowTitle);
@@ -1319,7 +1340,7 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
     m_render_widget->installEventFilter(this);
     connect(m_render_widget, &RenderWidget::Closed, this, &MainWindow::ForceStop);
     connect(m_render_widget, &RenderWidget::FocusChanged, this, [this](bool focus) {
-      if (m_render_widget->isFullScreen())
+      if (m_render_widget->windowState() == Qt::WindowFullScreen)
         SetFullScreenResolution(focus);
     });
 
