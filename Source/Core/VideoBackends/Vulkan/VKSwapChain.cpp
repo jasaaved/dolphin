@@ -198,20 +198,21 @@ bool SwapChain::SelectSurfaceFormat()
   // "g_ActiveConfig" might not have been been updated yet.
   if (g_Config.bHDR && surface_format_RGBA16F_scRGB)
     surface_format = surface_format_RGBA16F_scRGB;
-  else if (surface_format_RGB10_A2)
-    surface_format = surface_format_RGB10_A2;
-  else if (surface_format_RGBA8)
-    surface_format = surface_format_RGBA8;
   else if (surface_format_BGRA8)
     surface_format = surface_format_BGRA8;
+  else if (surface_format_RGBA8)
+    surface_format = surface_format_RGBA8;
+  else if (surface_format_RGB10_A2)
+    surface_format = surface_format_RGB10_A2;
+  
 
   if (surface_format)
   {
     const VkFormat format = VKTexture::GetLinearFormat(surface_format->format);
-    if (format == VK_FORMAT_R8G8B8A8_UNORM)
-      m_texture_format = AbstractTextureFormat::RGBA8;
-    else if (format == VK_FORMAT_B8G8R8A8_UNORM)
+    if (format == VK_FORMAT_B8G8R8A8_UNORM)
       m_texture_format = AbstractTextureFormat::BGRA8;
+    else if (format == VK_FORMAT_R8G8B8A8_UNORM)
+      m_texture_format = AbstractTextureFormat::RGBA8;
     else if (format == VK_FORMAT_A2B10G10R10_UNORM_PACK32)
       m_texture_format = AbstractTextureFormat::RGB10_A2;
     else if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
